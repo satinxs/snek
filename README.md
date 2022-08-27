@@ -1,6 +1,13 @@
 Things implemented so far:
+
+Parsing:
     Statements:
         - expression statements
+        - def
+        - if/else
+        - while
+        - return
+
     Expression:
         - assignment
         - bool or
@@ -12,14 +19,8 @@ Things implemented so far:
         - prefixes
         - member or call
         - _some_ atoms (string, number, identifier, true, false, none, parenthesized expressions, array literal, object literal)
-    
-Things missing:
-    Statements:
-        - def
-        - if/else
-        - while
-        - return ?
 
-        //These two... not so sure
-        - goto
-        - label:
+Missing:
+    - Interpreter
+    - Compiler to bytecode
+    - Compiler to other languages

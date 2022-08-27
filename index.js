@@ -1,6 +1,8 @@
+const fs = require('fs');
+const { asTree } = require('treeify');
 const Compiler = require('./snek');
 
-const source = `a = [{}, { Snek, position: 0 }]`;
+const source = fs.readFileSync('test.snek', 'utf-8');
 
 const compiler = new Compiler(source);
 
@@ -9,13 +11,8 @@ const [success, ast] = compiler.interpret();
 console.timeEnd('Parsing');
 
 if (success) {
-    const Drawer = require('./drawer');
-
-    const lines = new Drawer(source).draw(ast);
-
-    console.log(lines);
-
-    console.log(JSON.stringify(ast, null, 2));
-
-} else
-    console.error('Failed', compiler.errors);
+    console.log(asTree(ast, true, true));
+} else {
+    console.error('Failed');
+    console.error(asTree(compiler.errors, true, true));
+}

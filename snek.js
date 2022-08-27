@@ -1,6 +1,6 @@
 const escapeRegExp = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); // $& means the whole matched string
 
-const k = str => new RegExp(`^(${str})(?!\w)`); //Keyword
+const k = str => new RegExp(`^(${str})(?!\\w)`); //Keyword
 const r = str => new RegExp('^' + escapeRegExp(str)); //Escaped regex
 
 //Order of the TokenTypes is important.
@@ -13,10 +13,11 @@ const TokenType = {
     Star: r('*'), Slash: r('/'), Plus: r('+'), Dash: r('-'), LeftAngle: r('<'), RightAngle: r('>'),
     Comma: r(','), Dot: r('.'), Colon: r(':'), Semicolon: r(';'), Equal: r('='),
     String: /^(['"])(.*?)\1/, Identifier: /^[a-zA-Z_][\w]*(?![\w])/,
-    Space: /^ +/, NewLine: /^\n/, Tab: /^\t+/, Whitespace: /^\s+/, Comment: /^#[^\n]*/,
+    Space: /^ +/, NewLine: /^\r?\n/, Tab: /^\t+/, Whitespace: /^\s+/, Comment: /^#[^\n]*\r?(\n|(?!.))/,
     Error: /^./
 };
 
+//TODO: Move this to a class, to maintain state and simplify logic.
 function tokenize(source) {
     const tokens = [];
     let input = source;
@@ -42,6 +43,42 @@ function tokenize(source) {
     return tokens;
 }
 
+function postProcessTokens(tokens) {
+    const newTokens = [];
+
+    let indent = 0;
+    const _indent = n => { newTokens.push({ type: 'Indent', length: n }); indent += n; }
+    const _dedent = n => { newTokens.push({ type: 'Dedent', length: n }); indent -= n; }
+
+    let newLine = true;
+    for (const token of tokens) {
+        if (newLine) {
+            if (token.type === 'NewLine') continue;
+
+            if (token.type === 'Space') {
+                const diff = token.length - indent;
+
+                if (diff > 0) _indent(diff);
+                else if (diff < 0) _dedent(-1 * diff);
+            } else if (indent > 0) // If we were in an indentation before, we reset to 0
+                _dedent(indent);
+        }
+
+        if (token.type === 'NewLine') {
+            newLine = true;
+            newTokens.push(token);
+            continue;
+        }
+
+        if (!['Space', 'Whitespace', 'Comment'].includes(token.type))
+            newTokens.push(token);
+
+        newLine = false;
+    }
+
+    return newTokens;
+}
+
 class Compiler {
     position = 0;
     errors = [];
@@ -49,17 +86,13 @@ class Compiler {
     constructor(source) { this.source = source; }
 
     get currentToken() { return this.tokens[this.position]; }
+    get isEOI() { return this.currentToken.type === 'EndOfInput'; }
 
     getValue({ position, length }) { return this.source.substring(position, position + length); }
 
     addError(message, { position, length }) { this.errors.push({ message, position, length }); }
 
-    peek(skipWhitespace = true) {
-        while (skipWhitespace && ['Space', 'Whitespace'].includes(this.currentToken.type))
-            this.position += 1;
-
-        return this.currentToken;
-    }
+    peek() { return this.currentToken; }
 
     match(...types) {
         const token = this.peek();
@@ -70,6 +103,12 @@ class Compiler {
         }
 
         return null;
+    }
+
+    check(...types) {
+        const token = this.peek();
+
+        return types.includes(token.type) ? token : null;
     }
 
     expect(...types) {
@@ -162,7 +201,7 @@ class Compiler {
 
                     node = { type: 'Index', left: node, right: expression };
                 } else if (this.match('LeftParens')) {
-                    const callNode = { type: 'Call', left: node, args: [] };
+                    const callNode = { type: 'Call', func: node, args: [] };
 
                     if (!this.match('RightParens')) {
                         const [success, args] = parseExpressionList();
@@ -264,41 +303,173 @@ class Compiler {
     }
 
     parseDef() {
-        const [success, identifier] = this.parseIdentifier();
+        const node = { type: 'Def', name: null, params: [], body: [] };
 
-        if (!success) return [false];
-
-        const name = this.getValue(identifier);
-        const node = { type: 'Def', name, params: [] };
-
-        if (!this.expect('LeftParens')) return [false];
-
-        while (!this.match('RightParens')) {
-            const [success, param] = this.parseIdentifier();
+        {
+            const [success, identifier] = this.parseIdentifier();
 
             if (!success) return [false];
 
-            param.type = 'Param';
+            node.name = identifier.value;
+        }
 
-            if (this.match('Equal')) {
-                const [success, expr] = this.parseExpression();
+        if (!this.expect('LeftParens')) return [false];
+
+        if (!this.match('RightParens'))
+            while (true) {
+                const [success, param] = this.parseIdentifier();
 
                 if (!success) return [false];
 
-                param.default = expr;
+                param.type = 'Param';
+
+                if (this.match('Equal')) {
+                    const [success, expr] = this.parseExpression();
+
+                    if (!success) return [false];
+
+                    param.default = expr;
+                }
+
+                node.params.push(param);
+
+                if (this.match('RightParens'))
+                    break;
+
+                if (!this.expect('Comma')) return [false];
             }
+
+        if (!this.expect('Colon')) return [false];
+
+        {
+            const [success, body] = this.parseBlock();
+
+            if (!success) return [false];
+
+            node.body = body;
         }
+
+        return [true, node]; //If we reached here, the parsing succeeded
     }
 
-    parseStatement() {
-        if (this.match('Def'))
+    parseBlock() {
+        if (this.match('NewLine'))
+            return this.parseIndentedBlock();
+
+        return this.parseInlineBlock();
+    }
+
+    parseIndentedBlock() {
+        const node = { type: 'Block', statements: [] };
+
+        if (!this.expect('Indent')) return [false];
+
+        while (!this.isEOI) {
+            const [success, statement] = this.parseStatement();
+
+            if (!success) return [false];
+
+            node.statements.push(statement);
+
+            if (this.match('Dedent')) return [true, node];
+        }
+
+        return [false]; //We never matched the end dedent
+    }
+
+    parseInlineBlock() {
+        const node = { type: 'Block', statements: [] };
+
+        while (!this.isEOI) {
+            const [success, statement] = this.parseStatement(true);
+
+            if (!success) return [false];
+
+            node.statements.push(statement);
+
+            if (this.match('NewLine')) return [true, node]; //NewLine marks the end of the inline block
+
+            if (!this.isEOI && !this.expect('Semicolon')) return [false];
+        }
+
+        return [true, node]; //If we reached end of input, the inline block is still valid
+    }
+
+    parseIf() {
+        const node = { type: 'If' };
+
+        {
+            const [success, condition] = this.parseExpression();
+            if (!success) return [false];
+            node.condition = condition;
+        }
+
+        if (!this.expect('Colon')) return [false];
+
+        {
+            const [success, then] = this.parseBlock();
+            if (!success) return [false];
+            node.then = then;
+        }
+
+        if (this.match('Else')) {
+            const [success, elseStmt] = this.parseStatement();
+            if (!success) return [false];
+            node.else = elseStmt;
+        }
+
+        return [true, node]; //If we reached here, the parsing succeeded.
+    }
+
+    parseExpressionStatement(isInline) {
+        const [success, expr] = this.parseExpression();
+
+        if (!success) return [false];
+
+        if (!isInline && !this.isEOI)
+            if (!this.expect('NewLine', 'Semicolon')) return [false];
+
+        return [true, expr];
+    }
+
+    parseWhile() {
+        const node = { type: 'While', condition: null, body: [] };
+
+        {
+            const [success, condition] = this.parseExpression();
+            if (!success) return [false];
+            node.condition = condition;
+        }
+
+        if (!this.expect('Colon')) return [false];
+
+        {
+            const [success, body] = this.parseBlock();
+            if (!success) return [false];
+            node.body = body;
+        }
+
+        return [true, node];
+    }
+
+    parseStatement(isInline = false) {
+        if (this.match('NewLine')) return [true, { type: 'Empty' }];
+
+        if (this.check('Indent'))
+            return this.parseIndentedBlock();
+        else if (this.match('Def'))
             return this.parseDef();
-        // else if (this.match('If'))
-        //     return this.parseIf();
-        // else if (this.match('While'))
-        //     return this.parseWhile();
-        // else
-        return this.parseExpression();
+        else if (this.match('If'))
+            return this.parseIf();
+        else if (this.match('While'))
+            return this.parseWhile();
+        else if (this.match('Return')) {
+            const [success, expression] = this.parseExpressionStatement(isInline);
+            if (!success) return [false];
+            return [true, { type: 'Return', expression }];
+        }
+        else
+            return this.parseExpressionStatement(isInline);
     }
 
     //TODO: Rewrite panic to sync syntax borders.
@@ -307,20 +478,24 @@ class Compiler {
     parse() {
         const statements = [];
 
-        while (this.currentToken.type !== 'EndOfInput') {
+        while (!this.isEOI) {
             const [success, node] = this.parseStatement();
 
             if (!success) //AHHHH
+            {
                 this.panic();
+                continue;
+            }
 
-            statements.push(node);
+            if (node.type !== 'Empty')
+                statements.push(node);
         }
 
         return [this.errors.length === 0, { type: 'Program', statements }];
     }
 
     interpret() {
-        this.tokens = tokenize(this.source);
+        this.tokens = postProcessTokens(tokenize(this.source));
         this.ast = this.parse();
 
         //TODO: Replace this with actual interpretation.
@@ -329,5 +504,6 @@ class Compiler {
 }
 
 Compiler.tokenize = tokenize;
+Compiler.postProcessTokens = postProcessTokens;
 
 module.exports = Compiler;
