@@ -1,10 +1,10 @@
+//Utility functions
 const escapeRegExp = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); // $& means the whole matched string
-
 const k = str => new RegExp(`^(${str})(?!\\w)`); //Keyword
 const r = str => new RegExp('^' + escapeRegExp(str)); //Escaped regex
 
 //Order of the TokenTypes is important.
-const TokenType = {
+const TokenTypes = {
     Def: k('def'), If: k('if'), Else: k('else'), While: k('while'), Import: k('import'), Return: k('return'),
     IsNot: k('is\\s+not'), Or: k('or'), And: k('and'), Is: k('is'), Not: k('not'),
     True: k('True'), False: k('False'), None: k('None'), Number: /^-?[0-9]+(\.[0-9]+)?/,
@@ -17,105 +17,96 @@ const TokenType = {
     Error: /^./
 };
 
-//TODO: Move this to a class, to maintain state and simplify logic.
-function tokenize(source) {
-    const tokens = [];
-    let input = source;
-    let position = 0;
+const defer = (f, r) => { f(); return r; };
 
-    while (input.length > 0) {
-        for (const [type, regex] of Object.entries(TokenType)) {
-            const match = input.match(regex);
+class Tokenizer {
+    position = 0; indentation = 0;
+    isNewLine = true; queue = [];
 
-            if (match) {
-                const length = match[0].length;
-                tokens.push({ position, type, length });
+    constructor(source) {
+        this.source = source;
+        this.input = source;
+    }
 
-                position += length;
-                input = input.substring(length);
-                break;
+    _advance(l) { this.position += l; this.input = this.input.substring(l); }
+
+    _token(type, length) { return defer(() => this._advance(length), { type, position: this.position, length }); }
+
+    _next() {
+        for (const [type, regex] of Object.entries(TokenTypes)) {
+            const match = this.input.match(regex);
+
+            if (match)
+                return this._token(type, match[0].length);
+        }
+    }
+
+    _processIndentation(position, diff) {
+        const type = diff < 0 ? 'Dedent' : 'Indent';
+        for (let i = 0; i < Math.abs(diff); i += 1)
+            this.queue.push({ type, position, length: 1 });
+
+        this.indentation += diff;
+        this.isNewLine = false;
+
+        return this.queue.pop();
+    }
+
+    next() {
+        if (this.queue.length > 0) return this.queue.pop();
+        if (this.input.length === 0) return { type: 'EndOfInput' };
+
+        let token;
+        while (token = this._next()) {
+            if (this.isNewLine) {
+                if (token.type === 'NewLine') continue;
+
+                if (token.type === 'Space') {
+                    if (this.indentation === token.length) continue;
+                    return this._processIndentation(token.position, token.length - this.indentation);
+                } else if (this.indentation > 0) {
+                    this.queue.push(token);
+                    return this._processIndentation(token.position, -this.indentation);
+                }
             }
+
+            this.isNewLine = token.type === 'NewLine';
+
+            if (!['Space', 'Whitespace', 'Comment'].includes(token.type))
+                return token;
         }
     }
-
-    tokens.push({ type: 'EndOfInput' }); //Mark the end of the token stream
-
-    return tokens;
-}
-
-function postProcessTokens(tokens) {
-    const newTokens = [];
-
-    let indent = 0;
-    const _indent = n => { newTokens.push({ type: 'Indent', length: n }); indent += n; }
-    const _dedent = n => { newTokens.push({ type: 'Dedent', length: n }); indent -= n; }
-
-    let newLine = true;
-    for (const token of tokens) {
-        if (newLine) {
-            if (token.type === 'NewLine') continue;
-
-            if (token.type === 'Space') {
-                const diff = token.length - indent;
-
-                if (diff > 0) _indent(diff);
-                else if (diff < 0) _dedent(-1 * diff);
-            } else if (indent > 0) // If we were in an indentation before, we reset to 0
-                _dedent(indent);
-        }
-
-        if (token.type === 'NewLine') {
-            newLine = true;
-            newTokens.push(token);
-            continue;
-        }
-
-        if (!['Space', 'Whitespace', 'Comment'].includes(token.type))
-            newTokens.push(token);
-
-        newLine = false;
-    }
-
-    return newTokens;
 }
 
 class Compiler {
-    position = 0;
     errors = [];
-
     constructor(source) { this.source = source; }
 
-    get currentToken() { return this.tokens[this.position]; }
     get isEOI() { return this.currentToken.type === 'EndOfInput'; }
 
     getValue({ position, length }) { return this.source.substring(position, position + length); }
 
     addError(message, { position, length }) { this.errors.push({ message, position, length }); }
 
-    peek() { return this.currentToken; }
+    advance() { this.currentToken = this.tokenizer.next(); }
 
     match(...types) {
-        const token = this.peek();
+        const token = this.currentToken;
 
         if (types.includes(token.type)) {
-            this.position += 1;
+            this.advance();
             return token;
         }
 
         return null;
     }
 
-    check(...types) {
-        const token = this.peek();
-
-        return types.includes(token.type) ? token : null;
-    }
+    check(...types) { return types.includes(this.currentToken.type) ? this.currentToken : null; }
 
     expect(...types) {
         const token = this.match(...types);
 
-        if (!token)
-            this.addError(`Expected ${types}, found ${this.currentToken.type}`, this.currentToken);
+        if (!token) this.addError(`Expected ${types}, found ${this.currentToken.type}`, this.currentToken);
 
         return token;
     }
@@ -134,23 +125,23 @@ class Compiler {
 
         if (!success) return [false];
 
-        let token = this.peek();
+        let token = this.currentToken;
         while (operators.includes(token.type)) {
-            this.position += 1;
+            this.advance();
 
             const [success, right] = func();
 
             if (!success) return [false];
 
             left = { type: token.type, left, right };
-            token = this.peek();
+            token = this.currentToken;
         }
 
         return [true, left];
     }
 
     parseIdentifier() {
-        const token = this.peek();
+        const token = this.currentToken;
 
         if (!this.expect('Identifier')) return [false];
 
@@ -281,7 +272,7 @@ class Compiler {
         };
 
         const parsePrimary = () => {
-            const token = this.peek();
+            const token = this.currentToken;
 
             if (this.match('LeftParens'))
                 return this.parseParenthesizedExpression();
@@ -473,7 +464,7 @@ class Compiler {
     }
 
     //TODO: Rewrite panic to sync syntax borders.
-    panic() { this.position = this.tokens.length - 1; }
+    panic() { this.currentToken = { type: 'EndOfInput' }; }
 
     parse() {
         const statements = [];
@@ -495,15 +486,13 @@ class Compiler {
     }
 
     interpret() {
-        this.tokens = postProcessTokens(tokenize(this.source));
+        this.tokenizer = new Tokenizer(this.source);
+        this.currentToken = this.tokenizer.next();
         this.ast = this.parse();
 
         //TODO: Replace this with actual interpretation.
         return this.ast;
     }
 }
-
-Compiler.tokenize = tokenize;
-Compiler.postProcessTokens = postProcessTokens;
 
 module.exports = Compiler;
