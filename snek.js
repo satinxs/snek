@@ -1,11 +1,12 @@
 //Utility functions
+const defer = (f, r) => { f(); return r; };
 const escapeRegExp = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); // $& means the whole matched string
 const k = str => new RegExp(`^(${str})(?!\\w)`); //Keyword
 const r = str => new RegExp('^' + escapeRegExp(str)); //Escaped regex
 
 //Order of the TokenTypes is important.
 const TokenTypes = {
-    Def: k('def'), If: k('if'), Else: k('else'), While: k('while'), Import: k('import'), Return: k('return'),
+    Def: k('def'), If: k('if'), Else: k('else'), While: k('while'), Return: k('return'), Break: k('break'), Continue: k('continue'),
     IsNot: k('is\\s+not'), Or: k('or'), And: k('and'), Is: k('is'), Not: k('not'),
     True: k('True'), False: k('False'), None: k('None'), Number: /^-?[0-9]+(\.[0-9]+)?/,
     LeftParens: r('('), RightParens: r(')'), LeftSquare: r('['), RightSquare: r(']'), LeftCurly: r('{'), RightCurly: r('}'),
@@ -13,20 +14,14 @@ const TokenTypes = {
     Star: r('*'), Slash: r('/'), Plus: r('+'), Dash: r('-'), LeftAngle: r('<'), RightAngle: r('>'),
     Comma: r(','), Dot: r('.'), Colon: r(':'), Semicolon: r(';'), Equal: r('='),
     String: /^(['"])(.*?)\1/, Identifier: /^[a-zA-Z_][\w]*(?![\w])/,
-    Space: /^ +/, NewLine: /^\r?\n/, Tab: /^\t+/, Whitespace: /^\s+/, Comment: /^#[^\n]*\r?(\n|(?!.))/,
+    Space: /^ +/, NewLine: /^\r?\n/, Comment: /^#[^\n]*\r?(\n|(?!.))/,
     Error: /^./
 };
 
-const defer = (f, r) => { f(); return r; };
-
-class Tokenizer {
+export class Tokenizer {
     position = 0; indentation = 0;
     isNewLine = true; queue = [];
-
-    constructor(source) {
-        this.source = source;
-        this.input = source;
-    }
+    constructor(state) { this.state = state; this.source = state.source; this.input = state.source; }
 
     _advance(l) { this.position += l; this.input = this.input.substring(l); }
 
@@ -42,53 +37,62 @@ class Tokenizer {
     }
 
     _processIndentation(position, diff) {
+        if (diff % 4 !== 0) {
+            this.state.addError(`[Lexical] Bad indentation: Indentation should be multiple of 4, found ${Math.abs(diff)}`, { position, length: Math.abs(diff) });
+            return { type: 'Error', position, length: Math.abs(diff) };
+        }
+
         const type = diff < 0 ? 'Dedent' : 'Indent';
-        for (let i = 0; i < Math.abs(diff); i += 1)
-            this.queue.push({ type, position, length: 1 });
+        for (let i = 0; i < Math.abs(diff) / 4; i += 1)
+            this.queue.push({ type, position: position + i, length: 4 });
 
         this.indentation += diff;
-        this.isNewLine = false;
-
-        return this.queue.pop();
+        return this.queue.shift();
     }
 
     next() {
-        if (this.queue.length > 0) return this.queue.pop();
+        if (this.queue.length > 0) return this.queue.shift();
         if (this.input.length === 0) return { type: 'EndOfInput' };
 
         let token;
         while (token = this._next()) {
-            if (this.isNewLine) {
+            if (this.isNewLine && token.type !== 'Comment') {
                 if (token.type === 'NewLine') continue;
+
+                this.isNewLine = false;
 
                 if (token.type === 'Space') {
                     if (this.indentation === token.length) continue;
                     return this._processIndentation(token.position, token.length - this.indentation);
                 } else if (this.indentation > 0) {
-                    this.queue.push(token);
-                    return this._processIndentation(token.position, -this.indentation);
+                    return defer(
+                        () => this.queue.push(token),
+                        this._processIndentation(token.position, -this.indentation)
+                    );
                 }
             }
 
             this.isNewLine = token.type === 'NewLine';
 
-            if (!['Space', 'Whitespace', 'Comment'].includes(token.type))
+            if (!['Space', 'Comment'].includes(token.type))
                 return token;
         }
+
+        //Emit a dedent at the end of the file if needed
+        if (this.indentation > 0) return this._processIndentation(this.source.length - 1, -this.indentation);
+
+        return { type: 'EndOfInput' }; //We needed to ignore all of the last tokens.
     }
 }
 
-class Compiler {
-    errors = [];
-    constructor(source) { this.source = source; }
+export class Parser {
+    constructor(state) { this.state = state; }
 
     get isEOI() { return this.currentToken.type === 'EndOfInput'; }
 
-    getValue({ position, length }) { return this.source.substring(position, position + length); }
+    getValue({ position, length }) { return this.state.source.substring(position, position + length); }
 
-    addError(message, { position, length }) { this.errors.push({ message, position, length }); }
-
-    advance() { this.currentToken = this.tokenizer.next(); }
+    advance() { this.currentToken = this.state.tokenizer.next(); }
 
     match(...types) {
         const token = this.currentToken;
@@ -106,7 +110,7 @@ class Compiler {
     expect(...types) {
         const token = this.match(...types);
 
-        if (!token) this.addError(`Expected ${types}, found ${this.currentToken.type}`, this.currentToken);
+        if (!token) this.state.addError(`[Syntax] Expected ${types}, found ${this.currentToken.type}`, this.currentToken);
 
         return token;
     }
@@ -286,7 +290,7 @@ class Compiler {
             if (this.match('LeftCurly'))
                 return parseObject();
 
-            this.addError(`Expected a primary expression: Number, String, Identifier, True, False, Array literal, Object literal or None, but found ${token.type}`, token);
+            this.state.addError(`[Syntax] Expected a primary expression: Number, String, Identifier, True, False, Array literal, Object literal or None, but found ${token.type}`, token);
             return [false];
         }
 
@@ -360,7 +364,7 @@ class Compiler {
 
             if (!success) return [false];
 
-            node.statements.push(statement);
+            if (statement.type !== 'Empty') node.statements.push(statement);
 
             if (this.match('Dedent')) return [true, node];
         }
@@ -376,7 +380,7 @@ class Compiler {
 
             if (!success) return [false];
 
-            node.statements.push(statement);
+            if (statement.type !== 'Empty') node.statements.push(statement);
 
             if (this.match('NewLine')) return [true, node]; //NewLine marks the end of the inline block
 
@@ -443,56 +447,181 @@ class Compiler {
         return [true, node];
     }
 
+    parseReturn(isInline) {
+        const [success, expression] = this.parseExpressionStatement(isInline);
+        if (!success) return [false];
+        return [true, { type: 'Return', expression }];
+    }
+
     parseStatement(isInline = false) {
         if (this.match('NewLine')) return [true, { type: 'Empty' }];
 
-        if (this.check('Indent'))
-            return this.parseIndentedBlock();
-        else if (this.match('Def'))
-            return this.parseDef();
-        else if (this.match('If'))
-            return this.parseIf();
-        else if (this.match('While'))
-            return this.parseWhile();
-        else if (this.match('Return')) {
-            const [success, expression] = this.parseExpressionStatement(isInline);
-            if (!success) return [false];
-            return [true, { type: 'Return', expression }];
-        }
-        else
-            return this.parseExpressionStatement(isInline);
+        if (this.check('Indent')) return this.parseIndentedBlock();
+        else if (this.match('Def')) return this.parseDef();
+        else if (this.match('If')) return this.parseIf();
+        else if (this.match('While')) return this.parseWhile();
+        else if (this.match('Return')) return this.parseReturn(isInline);
+        else if (this.match('Break')) return { type: 'Break' };
+        else if (this.match('Continue')) return { type: 'Continue' };
+        else return this.parseExpressionStatement(isInline);
     }
 
     //TODO: Rewrite panic to sync syntax borders.
     panic() { this.currentToken = { type: 'EndOfInput' }; }
 
     parse() {
+        this.advance();
+
         const statements = [];
 
         while (!this.isEOI) {
             const [success, node] = this.parseStatement();
 
-            if (!success) //AHHHH
-            {
-                this.panic();
-                continue;
-            }
+            if (!success) { this.panic(); continue; } //AHHHH
 
-            if (node.type !== 'Empty')
-                statements.push(node);
+            if (node.type !== 'Empty') statements.push(node);
         }
 
-        return [this.errors.length === 0, { type: 'Program', statements }];
-    }
-
-    interpret() {
-        this.tokenizer = new Tokenizer(this.source);
-        this.currentToken = this.tokenizer.next();
-        this.ast = this.parse();
-
-        //TODO: Replace this with actual interpretation.
-        return this.ast;
+        return [this.state.errors.length === 0, { type: 'Program', statements }];
     }
 }
 
-module.exports = Compiler;
+class Variable { constructor(scope, value) { this.scope = scope; this.value = value; } }
+
+export class TreeInterpreter {
+    stack = [];
+    variables = new Map();
+
+    scope = [new Map()];
+    scopeIndex = 0;
+    get currentScope() { return this.scope[this.scope.length - 1]; }
+
+    startScope() { this.scopeIndex += 1; }
+
+    endScope() {
+        const id = this.scopeIndex;
+
+        for (const variable of this.variables.values()) {
+            if (variable[variable.length - 1].scope === id)
+                variable.pop(); //If the variable has a scoped definition, pop it.
+        }
+
+        this.scopeIndex -= 1;
+    }
+
+    createFunction(node) {
+        const { name, params, body } = node;
+    }
+
+    callFunction(node) {
+        const func = this.walk(node.func);
+
+        const args = [];
+        for (const arg of node.args)
+            args.push(this.walk(arg));
+
+        if (typeof (func) === 'function')
+            func(...args);
+        else {
+
+        }
+    }
+
+    index(node, isMember = false) {
+        const left = this.walk(node.left);
+
+        const right = isMember
+            ? node.right.value //Right will be an identifier.
+            : this.walk(node.right);
+
+        //TODO: Validate left is object and throw with correct source location
+        return left[right];
+    }
+
+    getVariable(name) {
+        if (!this.variables.get(name)) return null;
+
+        const variable = this.variables.get(name);
+
+        return variable[variable.length - 1].value;
+    }
+
+    setVariable(name, value) {
+        const scopedVariable = new Variable(this.scopeIndex, value);
+
+        if (!this.variables.has(name))
+            this.variables.set(name, [scopedVariable]);
+        else {
+            const variable = this.variables.get(name);
+            variable.push(scopedVariable);
+        }
+    }
+
+    runBlock({ statements }) {
+        this.startScope();
+
+        for (const statement of statements)
+            this.walk(statement);
+
+        this.endScope();
+    }
+
+    assignment({ type, left, right }) {
+        if (['Index', 'Member'].includes(left.type)) {
+
+        }
+    }
+
+    walk(node) {
+        try {
+            switch (node.type) {
+                case 'Def': return this.createFunction(node);
+                case 'Call': return this.callFunction(node);
+                case 'Member': return this.index(node, true);
+                case 'Index': return this.index(node);
+
+                case 'Equal': return this.assignment(node);
+                case 'Identifier': return this.getVariable(node);
+                case 'Block': return this.runBlock(node);
+
+                //Values
+                case 'String': return node.value;
+                case 'Number': return parseFloat(node.value);
+                case 'True': return true;
+                case 'False': return false;
+                case 'None': return null;
+                default:
+                // throw new Error(`Unexpected AST node = "${JSON.stringify(node)}"`);
+            }
+        } catch (error) {
+            console.log('Encountered an error when executing your program.');
+            console.log(error);
+        }
+    }
+}
+
+export default class Snek {
+    errors = [];
+    constructor(source) {
+        this.source = source;
+        this.tokenizer = new Tokenizer(this);
+        this.parser = new Parser(this);
+    }
+
+    addError(message, { position, length }) { this.errors.push({ message, position, length }); }
+
+    execute() {
+        const [success, program] = this.parser.parse();
+
+        if (success) {
+            const interpreter = new TreeInterpreter();
+
+            interpreter.variables.set('io', {
+                print: (...args) => console.log(...args)
+            });
+
+            for (const statement of program.statements)
+                interpreter.walk(statement);
+        }
+    }
+}

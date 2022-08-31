@@ -1,35 +1,42 @@
-const fs = require('fs');
-const { asTree } = require('treeify');
-const Compiler = require('./snek');
+import { parseArgs } from "node:util";
+import * as fs from 'fs';
+
+import treeify from 'treeify';
+const { asTree } = treeify;
+
+import Snek, { Tokenizer } from './snek.js';
+
+const { values: { tokenize } } = parseArgs({ options: { tokenize: { type: 'boolean' } } });
 
 const source = fs.readFileSync('test.snek', 'utf-8');
 
-const compiler = new Compiler(source);
-// const Tokenizer = require('./tokenizer');
+const snek = new Snek(source);
 
-// const tokenizer = new Tokenizer(source);
+if (tokenize) {
+    const getValue = ({ position, length }) => JSON.stringify(source.substring(position, position + length));
 
-// const stdout = process.stdout;
-// for (let token = tokenizer.next(); token.type !== 'EndOfInput'; token = tokenizer.next()) {
-//     if (token.type === 'NewLine')
-//         stdout.write('\n');
-//     else if (token.type === 'Indent')
-//         stdout.write('=> ');
-//     else if (token.type === 'Dedent')
-//         stdout.write('<= ');
-//     else {
-//         const value = source.substring(token.position, token.position + token.length);
-//         stdout.write(value + ' ');
-//     }
-// }
+    const tokenizer = new Tokenizer(snek);
+    const write = str => process.stdout.write(str);
 
-console.time('Parsing');
-const [success, ast] = compiler.interpret();
-console.timeEnd('Parsing');
-
-if (success) {
-    console.log(asTree(ast, true, true));
+    let token;
+    do {
+        token = tokenizer.next();
+        if (token.type === 'NewLine')
+            write('\n');
+        else if (token.type === 'Indent')
+            write('{\n');
+        else if (token.type === 'Dedent')
+            write('}\n');
+        else if (token.type === 'EndOfInput')
+            write('[EOI]\n\n');
+        else
+            write(getValue(token) + ' ');
+    } while (token.type !== 'EndOfInput');
 } else {
-    console.error('Failed');
-    console.error(asTree(compiler.errors, true, true));
+    snek.execute();
+
+    if (snek.errors.length > 0) {
+        console.error('Failed');
+        console.error(asTree(snek.errors, true, true));
+    }
 }
