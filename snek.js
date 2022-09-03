@@ -1,89 +1,52 @@
-//Utility functions
-const defer = (f, r) => { f(); return r; };
-const escapeRegExp = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); // $& means the whole matched string
-const k = str => new RegExp(`^(${str})(?!\\w)`); //Keyword
-const r = str => new RegExp('^' + escapeRegExp(str)); //Escaped regex
+const regex = /( +)|(\r?\n)|([a-zA-Z_][\w]*)|(-?[0-9]+(\.[0-9]+)?)|("(\\"|[^"])*?")|(\()|(\))|(\[)|(\])|(\{)|(\})|(\.)|(,)|(=)|(;)|(:)|(<=)|(<)|(>=)|(>)|(\+=)|(\+)|(-=)|(-)|(\*=)|(\*)|(\/=)|(\/)|(#[^\n]*\r?(\n|(?!.)))|(.)/g;
+const TokenTypes = ['Space', 'NewLine', 'Identifier', 'Number', null, 'String', null, 'LeftParens', 'RightParens', 'LeftSquare', 'RightSquare', 'LeftCurly', 'RightCurly', 'Dot', 'Comma', 'Equal', 'Semicolon', 'Colon', 'LeftAngleEqual', 'LeftAngle', 'RightAngleEqual', 'RightAngle', 'PlusEqual', 'Plus', 'DashEqual', 'Dash', 'StarEqual', 'Star', 'SlashEqual', 'Slash', 'Comment', null, 'Error'];
+const keywords = Object.fromEntries(['and', 'break', 'continue', 'def', 'else', 'False', 'if', 'is', 'None', 'not', 'or', 'return', 'True', 'while'].map(k => [k, k.charAt(0).toUpperCase() + k.substring(1)]));
 
-//Order of the TokenTypes is important.
-const TokenTypes = {
-    Def: k('def'), If: k('if'), Else: k('else'), While: k('while'), Return: k('return'), Break: k('break'), Continue: k('continue'),
-    IsNot: k('is\\s+not'), Or: k('or'), And: k('and'), Is: k('is'), Not: k('not'),
-    True: k('True'), False: k('False'), None: k('None'), Number: /^-?[0-9]+(\.[0-9]+)?/,
-    LeftParens: r('('), RightParens: r(')'), LeftSquare: r('['), RightSquare: r(']'), LeftCurly: r('{'), RightCurly: r('}'),
-    LeftAngleEqual: r('<='), RightAngleEqual: r('>='), StarEqual: r('*='), SlashEqual: r('/='), PlusEqual: r('+='), DashEqual: r('-='),
-    Star: r('*'), Slash: r('/'), Plus: r('+'), Dash: r('-'), LeftAngle: r('<'), RightAngle: r('>'),
-    Comma: r(','), Dot: r('.'), Colon: r(':'), Semicolon: r(';'), Equal: r('='),
-    String: /^(['"])(.*?)\1/, Identifier: /^[a-zA-Z_][\w]*(?![\w])/,
-    Space: /^ +/, NewLine: /^\r?\n/, Comment: /^#[^\n]*\r?(\n|(?!.))/,
-    Error: /^./
-};
+function* tokenize(state) {
+    const _token = (id, position, text) => {
+        const type = (id === 2 ? keywords[text] ?? 'Identifier' : TokenTypes[id]) ?? 'Error';
+        return { type, position, length: text.length };
+    };
 
-export class Tokenizer {
-    position = 0; indentation = 0;
-    isNewLine = true; queue = [];
-    constructor(state) { this.state = state; this.source = state.source; this.input = state.source; }
+    let isNewLine = true; let queue = []; let indentation = 0;
 
-    _advance(l) { this.position += l; this.input = this.input.substring(l); }
-
-    _token(type, length) { return defer(() => this._advance(length), { type, position: this.position, length }); }
-
-    _next() {
-        for (const [type, regex] of Object.entries(TokenTypes)) {
-            const match = this.input.match(regex);
-
-            if (match)
-                return this._token(type, match[0].length);
-        }
-    }
-
-    _processIndentation(position, diff) {
+    const _processIndentation = (position, diff) => {
         if (diff % 4 !== 0) {
-            this.state.addError(`[Lexical] Bad indentation: Indentation should be multiple of 4, found ${Math.abs(diff)}`, { position, length: Math.abs(diff) });
+            state.addError(`[Lexical] Bad indentation: Indentation should be multiple of 4, found ${Math.abs(diff)}`, { position, length: Math.abs(diff) });
             return { type: 'Error', position, length: Math.abs(diff) };
         }
 
-        const type = diff < 0 ? 'Dedent' : 'Indent';
         for (let i = 0; i < Math.abs(diff) / 4; i += 1)
-            this.queue.push({ type, position: position + i, length: 4 });
+            queue.push({ type: diff < 0 ? 'Dedent' : 'Indent', position: position + i, length: 4 });
 
-        this.indentation += diff;
-        return this.queue.shift();
+        indentation += diff;
+    };
+
+    for (const match of state.source.matchAll(regex)) {
+        let id = 0;
+        for (; id < match.length; id += 1)
+            if (match[id + 1] !== undefined) break;
+
+        const token = _token(id, match.index, match[0]);
+
+        if (isNewLine && token.type === 'Space') _processIndentation(token.position, token.length - indentation);
+        else if (isNewLine && token.type !== 'NewLine' && indentation > 0)
+            _processIndentation(token.position, -indentation);
+
+        while (queue.length > 0) yield queue.shift();
+
+        if (!['Space', 'Comment'].includes(token.type))
+            yield token;
+
+        isNewLine = token.type === 'NewLine';
     }
 
-    next() {
-        if (this.queue.length > 0) return this.queue.shift();
-        if (this.input.length === 0) return { type: 'EndOfInput' };
-
-        let token;
-        while (token = this._next()) {
-            if (this.isNewLine && token.type !== 'Comment') {
-                if (token.type === 'NewLine') continue;
-
-                this.isNewLine = false;
-
-                if (token.type === 'Space') {
-                    if (this.indentation === token.length) continue;
-                    return this._processIndentation(token.position, token.length - this.indentation);
-                } else if (this.indentation > 0) {
-                    return defer(
-                        () => this.queue.push(token),
-                        this._processIndentation(token.position, -this.indentation)
-                    );
-                }
-            }
-
-            this.isNewLine = token.type === 'NewLine';
-
-            if (!['Space', 'Comment'].includes(token.type))
-                return token;
-        }
-
-        //Emit a dedent at the end of the file if needed
-        if (this.indentation > 0) return this._processIndentation(this.source.length - 1, -this.indentation);
-
-        return { type: 'EndOfInput' }; //We needed to ignore all of the last tokens.
-    }
+    if (indentation > 0) _processIndentation(state.source.length - 1, -indentation);
+    while (queue.length > 0) yield queue.shift();
+    yield { type: 'EndOfInput' };
 }
+
+const defer = (f, r) => { f(); return r; };
 
 export class Parser {
     constructor(state) { this.state = state; }
@@ -92,15 +55,13 @@ export class Parser {
 
     getValue({ position, length }) { return this.state.source.substring(position, position + length); }
 
-    advance() { this.currentToken = this.state.tokenizer.next(); }
+    advance() { this.currentToken = this.state.tokenizer.next().value ?? { type: 'EndOfInput' }; }
 
     match(...types) {
         const token = this.currentToken;
 
-        if (types.includes(token.type)) {
-            this.advance();
-            return token;
-        }
+        if (types.includes(token.type))
+            return defer(() => this.advance(), token);
 
         return null;
     }
@@ -118,10 +79,7 @@ export class Parser {
     parseParenthesizedExpression() {
         const expression = this.parseExpression();
 
-        if (!this.expect('RightParens'))
-            return [false];
-
-        return expression;
+        return this.expect('RightParens') ? expression : [false];
     }
 
     parseBinary(operators, func) {
@@ -147,9 +105,9 @@ export class Parser {
     parseIdentifier() {
         const token = this.currentToken;
 
-        if (!this.expect('Identifier')) return [false];
-
-        return [true, { type: 'Identifier', value: this.getValue(token) }];
+        return this.expect('Identifier')
+            ? [true, { type: 'Identifier', value: this.getValue(token) }]
+            : [false];
     }
 
     parseExpression() {
@@ -166,10 +124,7 @@ export class Parser {
 
             if (token) {
                 const [success, expression] = prefix();
-
-                if (!success) return [false];
-
-                return [true, { type: `Unary${token.type}`, expression }];
+                return success ? [true, { type: `Unary${token.type}`, expression }] : [false];
             }
 
             return memberOrCall(); //If prefix was not matched, we return the next in the expression chain
@@ -407,8 +362,8 @@ export class Parser {
             node.then = then;
         }
 
-        if (this.match('Else')) {
-            const [success, elseStmt] = this.parseStatement();
+        if (this.match('Else') && this.expect('Colon')) {
+            const [success, elseStmt] = this.parseBlock();
             if (!success) return [false];
             node.else = elseStmt;
         }
@@ -501,9 +456,11 @@ export class TreeInterpreter {
     endScope() {
         const id = this.scopeIndex;
 
-        for (const variable of this.variables.values()) {
-            if (variable[variable.length - 1].scope === id)
-                variable.pop(); //If the variable has a scoped definition, pop it.
+        const entries = this.variables.entries();
+
+        for (const [k, v] of entries) {
+            if (v.scope === id)
+                this.variables.delete(k);
         }
 
         this.scopeIndex -= 1;
@@ -538,22 +495,28 @@ export class TreeInterpreter {
         return left[right];
     }
 
+    indexSet(lvalue, rvalue) {
+        const target = this.walk(lvalue.left);
+        const key = lvalue.type === 'Index' ? lvalue.right.value : this.walk(lvalue.right);
+        const value = this.walk(rvalue);
+
+        if (typeof (target) !== 'object') throw new Error('Invalid target for object assign');
+
+        target[key] = value;
+    }
+
     getVariable(name) {
-        if (!this.variables.get(name)) return null;
+        if (!this.variables.has(name)) return null;
 
-        const variable = this.variables.get(name);
-
-        return variable[variable.length - 1].value;
+        return this.variables.get(name).value;
     }
 
     setVariable(name, value) {
-        const scopedVariable = new Variable(this.scopeIndex, value);
-
-        if (!this.variables.has(name))
-            this.variables.set(name, [scopedVariable]);
+        if (this.variables.has(name))
+            this.variables.get(name).value = value;
         else {
-            const variable = this.variables.get(name);
-            variable.push(scopedVariable);
+            const scopedVariable = new Variable(this.scopeIndex, value);
+            this.variables.set(name, scopedVariable);
         }
     }
 
@@ -567,9 +530,12 @@ export class TreeInterpreter {
     }
 
     assignment({ type, left, right }) {
-        if (['Index', 'Member'].includes(left.type)) {
-
-        }
+        if (['Index', 'Member'].includes(left.type))
+            this.indexSet(left, right);
+        else if (left.type === 'Identifier') {
+            this.setVariable(left.value, this.walk(right));
+        } else
+            throw new Error('Unexpected lvalue for assignment');
     }
 
     walk(node) {
@@ -581,8 +547,11 @@ export class TreeInterpreter {
                 case 'Index': return this.index(node);
 
                 case 'Equal': return this.assignment(node);
-                case 'Identifier': return this.getVariable(node);
+                case 'Identifier': return this.getVariable(node.value);
                 case 'Block': return this.runBlock(node);
+
+                case 'Object': return this.createObject(node);
+                case 'Array': return this.createArray(node);
 
                 //Values
                 case 'String': return node.value;
@@ -604,24 +573,29 @@ export default class Snek {
     errors = [];
     constructor(source) {
         this.source = source;
-        this.tokenizer = new Tokenizer(this);
+        this.tokenizer = tokenize(this);
         this.parser = new Parser(this);
     }
 
     addError(message, { position, length }) { this.errors.push({ message, position, length }); }
 
-    execute() {
+    execute(runInterpreter = true) {
         const [success, program] = this.parser.parse();
 
         if (success) {
-            const interpreter = new TreeInterpreter();
+            this.ast = program;
 
-            interpreter.variables.set('io', {
-                print: (...args) => console.log(...args)
-            });
+            if (runInterpreter) {
+                const interpreter = new TreeInterpreter();
 
-            for (const statement of program.statements)
-                interpreter.walk(statement);
-        }
+                interpreter.setVariable('io', {
+                    print: (...args) => console.log(...args)
+                });
+
+                for (const statement of program.statements)
+                    interpreter.walk(statement);
+            }
+        } else
+            this.addError("Failed parsing");
     }
 }

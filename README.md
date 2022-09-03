@@ -24,3 +24,6 @@ Missing:
     - Interpreter
     - Compiler to bytecode
     - Compiler to other languages
+
+TODO:
+    - Fix inline blocks & semicolon-chained statements

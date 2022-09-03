@@ -12,6 +12,9 @@
                 "<node_internals>/**"
             ],
             "program": "${workspaceFolder}\\index.js",
+            // "args": [
+            //     "--tokenize"
+            // ],
             "console": "internalConsole",
             "outputCapture": "std",
         }
