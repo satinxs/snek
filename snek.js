@@ -1,10 +1,10 @@
-const regex = /( +)|(\r?\n)|([a-zA-Z_][\w]*)|(-?[0-9]+(\.[0-9]+)?)|("(\\"|[^"])*?")|(\()|(\))|(\[)|(\])|(\{)|(\})|(\.)|(,)|(=)|(;)|(:)|(<=)|(<)|(>=)|(>)|(\+=)|(\+)|(-=)|(-)|(\*=)|(\*)|(\/=)|(\/)|(#[^\n]*\r?(\n|(?!.)))|(.)/g;
+const regex = /( +)|(\r?\n)|([a-zA-Z_][\w]*)|([0-9]+(\.[0-9]+)?)|("(\\"|[^"])*?")|(\()|(\))|(\[)|(\])|(\{)|(\})|(\.)|(,)|(=)|(;)|(:)|(<=)|(<)|(>=)|(>)|(\+=)|(\+)|(-=)|(-)|(\*=)|(\*)|(\/=)|(\/)|(#[^\n]*\r?(\n|(?!.)))|(.)/g;
 const TokenTypes = ['Space', 'NewLine', 'Identifier', 'Number', null, 'String', null, 'LeftParens', 'RightParens', 'LeftSquare', 'RightSquare', 'LeftCurly', 'RightCurly', 'Dot', 'Comma', 'Equal', 'Semicolon', 'Colon', 'LeftAngleEqual', 'LeftAngle', 'RightAngleEqual', 'RightAngle', 'PlusEqual', 'Plus', 'DashEqual', 'Dash', 'StarEqual', 'Star', 'SlashEqual', 'Slash', 'Comment', null, 'Error'];
-const keywords = Object.fromEntries(['and', 'break', 'continue', 'def', 'else', 'False', 'if', 'is', 'None', 'not', 'or', 'return', 'True', 'while'].map(k => [k, k.charAt(0).toUpperCase() + k.substring(1)]));
+const keywords = new Map(['and', 'break', 'continue', 'def', 'else', 'False', 'if', 'is', 'None', 'not', 'or', 'return', 'True', 'while'].map(k => [k, k.charAt(0).toUpperCase() + k.substring(1)]));
 
-function* tokenize(state) {
+export function* tokenize(state) {
     const _token = (id, position, text) => {
-        const type = (id === 2 ? keywords[text] ?? 'Identifier' : TokenTypes[id]) ?? 'Error';
+        const type = (id === 2 ? keywords.get(text) ?? 'Identifier' : TokenTypes[id]) ?? 'Error';
         return { type, position, length: text.length };
     };
 
@@ -46,556 +46,349 @@ function* tokenize(state) {
     yield { type: 'EndOfInput' };
 }
 
-const defer = (f, r) => { f(); return r; };
+class SyntaxError extends Error { constructor(msg, token) { super(msg); this.token = token; } }
 
-export class Parser {
-    constructor(state) { this.state = state; }
-
-    get isEOI() { return this.currentToken.type === 'EndOfInput'; }
-
-    getValue({ position, length }) { return this.state.source.substring(position, position + length); }
-
-    advance() { this.currentToken = this.state.tokenizer.next().value ?? { type: 'EndOfInput' }; }
-
-    match(...types) {
-        const token = this.currentToken;
-
-        if (types.includes(token.type))
-            return defer(() => this.advance(), token);
-
-        return null;
-    }
-
-    check(...types) { return types.includes(this.currentToken.type) ? this.currentToken : null; }
-
-    expect(...types) {
-        const token = this.match(...types);
-
-        if (!token) this.state.addError(`[Syntax] Expected ${types}, found ${this.currentToken.type}`, this.currentToken);
-
-        return token;
-    }
-
-    parseParenthesizedExpression() {
-        const expression = this.parseExpression();
-
-        return this.expect('RightParens') ? expression : [false];
-    }
-
-    parseBinary(operators, func) {
-        let [success, left] = func();
-
-        if (!success) return [false];
-
-        let token = this.currentToken;
+export function parse(state) {
+    let currentToken = null;
+    const _node = (type, ...children) => ({ type, children });
+    const _throw = (msg, token) => { throw new SyntaxError(msg, token); };
+    const _defer = (f, r) => { f(); return r; };
+    const _isEOI = () => currentToken.type === 'EndOfInput';
+    const _getValue = ({ position, length }) => state.source.substring(position, position + length);
+    const _advance = () => currentToken = state.tokenizer.next().value ?? _node('EndOfInput');
+    const _match = (...types) => types.includes(currentToken.type) ? _defer(_advance, currentToken) : null;
+    const _expect = (...types) => _match(...types) ?? _throw(`[Syntax] Expected ${types}, found ${currentToken.type}`, currentToken);
+    const _switchMatch = (fail, ...typeFuncs) => {
+        for (const [types, func] of typeFuncs)
+            if (types.includes(currentToken.type)) {
+                const token = currentToken;
+                _advance();
+                return func(token);
+            }
+        return fail();
+    };
+    const _parseBinary = (operators, func) => {
+        let [left, token] = [func(), currentToken];
         while (operators.includes(token.type)) {
-            this.advance();
-
-            const [success, right] = func();
-
-            if (!success) return [false];
-
-            left = { type: token.type, left, right };
-            token = this.currentToken;
+            _advance();
+            [left, token] = [_node(token.type, left, func()), currentToken];
         }
+        return left;
+    };
 
-        return [true, left];
-    }
+    const _parseExpressionList = () => {
+        const list = [_parseExpression()];
+        while (_match('Comma'))
+            list.push(_parseExpression());
+        return list;
+    };
 
-    parseIdentifier() {
-        const token = this.currentToken;
+    const _parseArray = () => {
+        if (_match('RightSquare')) return _node('Array');
+        return _node('Array', ..._defer(() => _expect('RightSquare'), _parseExpressionList()));
+    };
 
-        return this.expect('Identifier')
-            ? [true, { type: 'Identifier', value: this.getValue(token) }]
-            : [false];
-    }
+    const _parseObject = () => {
+        const node = _node('Object');
+        if (_match('RightCurly')) return node; //Empty object
 
-    parseExpression() {
-        const assignment = () => this.parseBinary(['Equal', 'PlusEqual', 'DashEqual', 'SlashEqual', 'StarEqual'], boolOr);
-        const boolOr = () => this.parseBinary(['Or'], boolAnd);
-        const boolAnd = () => this.parseBinary(['And'], equality);
-        const equality = () => this.parseBinary(['Is', 'IsNot'], comparison);
-        const comparison = () => this.parseBinary(['LeftAngle', 'RightAngle', 'LeftAngleEqual', 'RightAngleEqual'], addition);
-        const addition = () => this.parseBinary(['Plus', 'Dash'], multiplication);
-        const multiplication = () => this.parseBinary(['Star', 'Slash'], prefix);
+        while (true) {
+            const key = _expect('Identifier');
 
-        const prefix = () => {
-            const token = this.match('Not', 'Dash');
+            if (_match('Colon')) {
+                const expr = _parseExpression();
+                node.children.push([_getValue(key), expr]);
+            } else //Yuck
+                node.children.push([_getValue(key), _node('Identifier', _getValue(key))]);
 
-            if (token) {
-                const [success, expression] = prefix();
-                return success ? [true, { type: `Unary${token.type}`, expression }] : [false];
-            }
+            if (_match('RightCurly')) return node;
 
-            return memberOrCall(); //If prefix was not matched, we return the next in the expression chain
-        };
-
-        const memberOrCall = () => {
-            let [success, node] = parsePrimary();
-
-            if (!success) return [false];
-
-            while (true) {
-                if (this.match('Dot')) {
-                    const [success, identifier] = this.parseIdentifier();
-
-                    if (!success) return [false];
-
-                    node = { type: 'Member', left: node, right: identifier };
-                } else if (this.match('LeftSquare')) {
-                    const [success, expression] = this.parseExpression();
-
-                    if (!success) return [false];
-
-                    if (!this.expect('RightSquare')) return [false];
-
-                    node = { type: 'Index', left: node, right: expression };
-                } else if (this.match('LeftParens')) {
-                    const callNode = { type: 'Call', func: node, args: [] };
-
-                    if (!this.match('RightParens')) {
-                        const [success, args] = parseExpressionList();
-
-                        if (!success) return [false];
-
-                        callNode.args = args;
-
-                        if (!this.expect('RightParens')) return [false];
-                    }
-
-                    node = callNode;
-                }
-                else break;
-            }
-
-            return [true, node];
-        };
-
-        //Warning, returns a list, not a node
-        const parseExpressionList = () => {
-            const [success, expr] = this.parseExpression();
-
-            if (!success) return [false];
-
-            const list = [expr];
-            while (this.match('Comma')) {
-                const [success, expr] = this.parseExpression();
-
-                if (!success) return [false];
-
-                list.push(expr);
-            }
-
-            return [true, list];
-        };
-
-        const parseArray = () => {
-            if (this.match('RightSquare'))
-                return [true, { type: 'Array', values: [] }];
-
-            const [success, list] = parseExpressionList();
-
-            if (!success) return [false];
-
-            if (!this.expect('RightSquare')) return [false];
-
-            return [true, { type: 'Array', values: list }];
-        };
-
-        const parseObject = () => {
-            const node = { type: 'Object', props: [] };
-
-            if (this.match('RightCurly'))
-                return [true, node];
-
-            while (true) {
-                const key = this.match('Identifier');
-
-                if (!key) return [false];
-
-                const value = this.getValue(key);
-
-                if (this.match('Colon')) {
-                    const [success, expr] = this.parseExpression();
-
-                    if (!success) return [false];
-
-                    node.props.push([value, expr]);
-                } else
-                    node.props.push([value, { type: 'String', value }]);
-
-                if (this.match('RightCurly')) return [true, node];
-
-                if (!this.expect('Comma')) return [false];
-            }
-        };
-
-        const parsePrimary = () => {
-            const token = this.currentToken;
-
-            if (this.match('LeftParens'))
-                return this.parseParenthesizedExpression();
-
-            if (this.match('Number', 'String', 'Identifier', 'True', 'False', 'None'))
-                return [true, { type: token.type, value: this.getValue(token) }];
-
-            if (this.match('LeftSquare'))
-                return parseArray();
-
-            if (this.match('LeftCurly'))
-                return parseObject();
-
-            this.state.addError(`[Syntax] Expected a primary expression: Number, String, Identifier, True, False, Array literal, Object literal or None, but found ${token.type}`, token);
-            return [false];
+            _expect('Comma');
         }
+    };
 
-        return assignment();
-    }
+    const _parseParenthesizedExpression = () => _defer(() => _expect('RightParens'), _parseExpression());
 
-    parseDef() {
-        const node = { type: 'Def', name: null, params: [], body: [] };
+    const _parsePrimary = () => _switchMatch(
+        () => _throw(`[Syntax] Expected a primary expression: Number, String, Identifier, True, False, Array literal, Object literal or None, but found ${currentToken.type}`, currentToken),
+        [['LeftParens'], _parseParenthesizedExpression],
+        [['Number', 'Identifier', 'True', 'False', 'None'], token => _node(token.type, _getValue(token))],
+        [['String'], token => _node('String', JSON.parse(_getValue(token)))],
+        [['LeftSquare'], _parseArray],
+        [['LeftCurly'], _parseObject],
+    );
 
-        {
-            const [success, identifier] = this.parseIdentifier();
+    const _parseMemberOrCall = () => {
+        let node = _parsePrimary();
+        while (true) {
+            const r = _switchMatch(() => false,
+                [['Dot'], () => _node('Index', node, _node('String', _getValue(_expect('Identifier'))))],
+                [['LeftSquare'], () => _defer(() => _expect('RightSquare'), _node('Index', node, _parseExpression()))],
+                [['LeftParens'], () => {
+                    return _match('RightParens')
+                        ? _node('Call', node)
+                        : _defer(() => _expect('RightParens'), _node('Call', node, _parseExpressionList()));
+                }]
+            );
 
-            if (!success) return [false];
-
-            node.name = identifier.value;
+            if (r) node = r;
+            else break;
         }
+        return node;
+    };
 
-        if (!this.expect('LeftParens')) return [false];
+    const _parsePrefix = () => _switchMatch(
+        () => _parseMemberOrCall(),
+        [['Not', 'Dash'], token => _node(`Unary${token.type}`, _parsePrefix())]
+    );
 
-        if (!this.match('RightParens'))
-            while (true) {
-                const [success, param] = this.parseIdentifier();
+    const _parseMultiplication = () => _parseBinary(['Star', 'Slash'], _parsePrefix);
 
-                if (!success) return [false];
+    const _parseAddition = () => _parseBinary(['Plus', 'Dash'], _parseMultiplication);
 
-                param.type = 'Param';
+    const _parseComparison = () => {
+        return _parseBinary(['LeftAngle', 'RightAngle', 'LeftAngleEqual', 'RightAngleEqual'], _parseAddition);
+    };
 
-                if (this.match('Equal')) {
-                    const [success, expr] = this.parseExpression();
+    const _parseEquality = () => {
+        let left = _parseComparison();
+        while (_match('Is'))
+            left = _node(_match('Not') ? 'IsNot' : 'Is', left, _parseComparison());
+        return left;
+    };
 
-                    if (!success) return [false];
+    const _parseBoolAnd = () => _parseBinary(['And'], _parseEquality);
 
-                    param.default = expr;
-                }
+    const _parseBoolOr = () => _parseBinary(['Or'], _parseBoolAnd);
 
-                node.params.push(param);
+    const _parseAssignment = () => _parseBinary(['Equal', 'PlusEqual', 'DashEqual', 'SlashEqual', 'StarEqual'], _parseBoolOr);
 
-                if (this.match('RightParens'))
-                    break;
+    const _parseExpression = () => _parseAssignment();
 
-                if (!this.expect('Comma')) return [false];
-            }
-
-        if (!this.expect('Colon')) return [false];
-
-        {
-            const [success, body] = this.parseBlock();
-
-            if (!success) return [false];
-
-            node.body = body;
-        }
-
-        return [true, node]; //If we reached here, the parsing succeeded
-    }
-
-    parseBlock() {
-        if (this.match('NewLine'))
-            return this.parseIndentedBlock();
-
-        return this.parseInlineBlock();
-    }
-
-    parseIndentedBlock() {
-        const node = { type: 'Block', statements: [] };
-
-        if (!this.expect('Indent')) return [false];
-
-        while (!this.isEOI) {
-            const [success, statement] = this.parseStatement();
-
-            if (!success) return [false];
-
-            if (statement.type !== 'Empty') node.statements.push(statement);
-
-            if (this.match('Dedent')) return [true, node];
-        }
-
-        return [false]; //We never matched the end dedent
-    }
-
-    parseInlineBlock() {
-        const node = { type: 'Block', statements: [] };
-
-        while (!this.isEOI) {
-            const [success, statement] = this.parseStatement(true);
-
-            if (!success) return [false];
-
-            if (statement.type !== 'Empty') node.statements.push(statement);
-
-            if (this.match('NewLine')) return [true, node]; //NewLine marks the end of the inline block
-
-            if (!this.isEOI && !this.expect('Semicolon')) return [false];
-        }
-
-        return [true, node]; //If we reached end of input, the inline block is still valid
-    }
-
-    parseIf() {
-        const node = { type: 'If' };
-
-        {
-            const [success, condition] = this.parseExpression();
-            if (!success) return [false];
-            node.condition = condition;
-        }
-
-        if (!this.expect('Colon')) return [false];
-
-        {
-            const [success, then] = this.parseBlock();
-            if (!success) return [false];
-            node.then = then;
-        }
-
-        if (this.match('Else') && this.expect('Colon')) {
-            const [success, elseStmt] = this.parseBlock();
-            if (!success) return [false];
-            node.else = elseStmt;
-        }
-
-        return [true, node]; //If we reached here, the parsing succeeded.
-    }
-
-    parseExpressionStatement(isInline) {
-        const [success, expr] = this.parseExpression();
-
-        if (!success) return [false];
-
-        if (!isInline && !this.isEOI)
-            if (!this.expect('NewLine', 'Semicolon')) return [false];
-
-        return [true, expr];
-    }
-
-    parseWhile() {
-        const node = { type: 'While', condition: null, body: [] };
-
-        {
-            const [success, condition] = this.parseExpression();
-            if (!success) return [false];
-            node.condition = condition;
-        }
-
-        if (!this.expect('Colon')) return [false];
-
-        {
-            const [success, body] = this.parseBlock();
-            if (!success) return [false];
-            node.body = body;
-        }
-
-        return [true, node];
-    }
-
-    parseReturn(isInline) {
-        const [success, expression] = this.parseExpressionStatement(isInline);
-        if (!success) return [false];
-        return [true, { type: 'Return', expression }];
-    }
-
-    parseStatement(isInline = false) {
-        if (this.match('NewLine')) return [true, { type: 'Empty' }];
-
-        if (this.check('Indent')) return this.parseIndentedBlock();
-        else if (this.match('Def')) return this.parseDef();
-        else if (this.match('If')) return this.parseIf();
-        else if (this.match('While')) return this.parseWhile();
-        else if (this.match('Return')) return this.parseReturn(isInline);
-        else if (this.match('Break')) return { type: 'Break' };
-        else if (this.match('Continue')) return { type: 'Continue' };
-        else return this.parseExpressionStatement(isInline);
-    }
-
-    //TODO: Rewrite panic to sync syntax borders.
-    panic() { this.currentToken = { type: 'EndOfInput' }; }
-
-    parse() {
-        this.advance();
-
+    const _internalParseBlock = isInline => {
         const statements = [];
+        if (!isInline) _expect('Indent');
+        while (!_isEOI() && (isInline || !_match('Dedent'))) {
+            const statement = _parseStatement(isInline);
+            if (statement.type !== 'Empty') statements.push(statement);
+            if (isInline)
+                if (_match('NewLine')) break;
+                else _expect('Semicolon');
+        }
+        return _node('Block', ...statements);
+    };
 
-        while (!this.isEOI) {
-            const [success, node] = this.parseStatement();
+    const _parseBlock = () => _internalParseBlock(!_match('NewLine'));
 
-            if (!success) { this.panic(); continue; } //AHHHH
+    const _parseDef = () => {
+        const [name, _] = [_node('Identifier', _getValue(_expect('Identifier'))), _expect('LeftParens')];
 
+        const params = [];
+        if (!_match('RightParens'))
+            while (true) {
+                params.push(_node('Param', _getValue(_expect('Identifier')), _match('Equal') ? _parseExpression() : undefined));
+
+                if (_match('RightParens')) break;
+                else _expect('Comma');
+            }
+
+        _expect('Colon');
+        return _node('Def', name, params, _parseBlock());
+    };
+
+    const _parseIf = () => {
+        let [condition, _, then, _else] = [_parseExpression(), _expect('Colon'), _parseBlock()];
+
+        if (_match('Else')) {
+            _else = _switchMatch(() => _throw(`[Syntax] Expected Colon or another If, but found ${currentToken.type}`, currentToken),
+                [['If'], _parseIf],
+                [['Colon'], _parseBlock]
+            );
+        }
+
+        return _node('If', condition, then, _else);
+    };
+
+    const _parseWhile = () => {
+        const [condition, _, body] = [_parseExpression(), _expect('Colon'), _parseBlock()];
+        return _node('While', condition, body);
+    };
+
+    const _parseReturn = isInline => _node('Return', _parseExpressionStatement(isInline));
+
+    const _parseExpressionStatement = (isInline) => _defer(
+        () => { if (!isInline && !_isEOI()) _expect('NewLine', 'Semicolon', 'Dedent'); },
+        _parseExpression()
+    );
+
+    const _parseStatement = (isInline = false) => _switchMatch(
+        () => _parseExpressionStatement(isInline),
+        [['NewLine'], () => _node('Empty')],
+        [['Indent'], () => _internalParseBlock(false)],
+        [['Def'], () => _parseDef()],
+        [['If'], () => _parseIf()],
+        [['While'], () => _parseWhile()],
+        [['Return'], () => _parseReturn(isInline)],
+        [['Break'], () => _node('Break')],
+        [['Continue'], () => _node('Continue')],
+    );
+
+    //Actual parse function
+    _advance();
+
+    const statements = [];
+    while (!_isEOI()) {
+        try {
+            const node = _parseStatement();
             if (node.type !== 'Empty') statements.push(node);
+        } catch (e) {
+            //Find a better way to sync on panic
+            currentToken = _node('EndOfInput');
+            state.addError(e.message, e.token);
         }
-
-        return [this.state.errors.length === 0, { type: 'Program', statements }];
     }
+
+    return _node('Program', ...statements);
 }
+export class Variable { constructor(scope, value) { this.scope = scope; this.value = value; } }
 
-class Variable { constructor(scope, value) { this.scope = scope; this.value = value; } }
+export function interpret(nodes, initial) {
+    let scope = 0; let variables = new Map(initial);
+    const _scope = f => {
+        scope += 1;
+        const r = f();
+        for (const [k, v] of variables.entries())
+            if (v.scope === scope) variables.delete(k);
+        scope -= 1;
+        return r;
+    };
+    const _get = k => variables.has(k) ? variables.get(k).value : null;
+    const _set = (k, v) => {
+        if (variables.has(k)) variables.get(k).value = v;
+        else variables.set(k, new Variable(scope, v));
+        return v;
+    };
+    const _isTruthy = v => !(v === false || v === null);
 
-export class TreeInterpreter {
-    stack = [];
-    variables = new Map();
+    const _runBlock = (node) => _scope(() => {
+        for (const statement of node.children)
+            if (statement.type === 'Return') return walk(statement);
+            else walk(statement);
+    });
 
-    scope = [new Map()];
-    scopeIndex = 0;
-    get currentScope() { return this.scope[this.scope.length - 1]; }
+    const _runFunctionDef = node => _set(node.children[0].children[0], node);
 
-    startScope() { this.scopeIndex += 1; }
+    const _runFunctionCall = node => {
+        const [funcNode, argList] = node.children;
+        const args = (argList ?? []).map(a => walk(a));
 
-    endScope() {
-        const id = this.scopeIndex;
+        const func = walk(funcNode);
+        if (typeof (func) === 'function') func(...args);
+        else return _scope(() => {
+            const [_, params, block] = func.children;
+            for (let i = 0; i < params.length; i += 1) {
+                const [k, d] = params[i].children;
+                const value = args[i] ?? walk(d);
+                _set(k, value);
+            }
+            return _runBlock(block);
+        });
+    };
 
-        const entries = this.variables.entries();
+    const _runIdentifier = node => _get(node.children[0]);
 
-        for (const [k, v] of entries) {
-            if (v.scope === id)
-                this.variables.delete(k);
+    const _doBinaryOperation = (type, left, right) => {
+        switch (type) {
+            case 'Is': return left === right;
+            case 'IsNot': return left !== right;
+            case 'LeftAngle': return left < right;
+            case 'RightAngle': return left > right;
+            case 'LeftAngleEqual': return left <= right;
+            case 'RightAngleEqual': return left >= right;
+            case 'Plus': case 'PlusEqual': return left + right;
+            case 'Dash': case 'DashEqual': return left - right;
+            case 'Star': case 'StarEqual': return left * right;
+            case 'Slash': case 'SlashEqual': return left / right;
+            default:
+                throw new Error('what');
         }
+    };
 
-        this.scopeIndex -= 1;
-    }
+    const _runBinaryOp = ({ type, children: [a, b] }) => _doBinaryOperation(type, walk(a), walk(b));
 
-    createFunction(node) {
-        const { name, params, body } = node;
-    }
+    const _runIf = node => {
+        const [condition, _then, _else] = node.children;
+        if (_isTruthy(walk(condition))) walk(_then);
+        else if (_else) walk(_else);
+    };
 
-    callFunction(node) {
-        const func = this.walk(node.func);
+    const _runWhile = node => {
+        const [condition, body] = node.children;
 
-        const args = [];
-        for (const arg of node.args)
-            args.push(this.walk(arg));
+        while (_isTruthy(walk(condition)))
+            walk(body);
+    };
 
-        if (typeof (func) === 'function')
-            func(...args);
-        else {
+    const _runReturn = node => walk(node.children[0]);
 
+    const _getObject = ({ children: [left, right] }) => walk(left)[walk(right)];
+
+    const _runAssign = ({ type, children: [left, right] }) => {
+        const rvalue = walk(right);
+        if (left.type === 'Identifier') {
+            const k = left.children[0];
+            if (type === 'Equal') return _set(k, rvalue);
+            return _set(k, _doBinaryOperation(type, _get(k), rvalue));
+        } else if (left.type === 'Index') {
+            const [obj, key] = [walk(left.children[0]), walk(left.children[1])];
+            if (type === 'Equal') return obj[key] = rvalue;
+            return obj[key] = _doBinaryOperation(type, obj[key], rvalue);
         }
-    }
+    };
 
-    index(node, isMember = false) {
-        const left = this.walk(node.left);
+    const _runArray = ({ children }) => children.map(node => walk(node));
 
-        const right = isMember
-            ? node.right.value //Right will be an identifier.
-            : this.walk(node.right);
+    const _runObject = ({ children }) => Object.fromEntries(children.map(([k, v]) => [k, walk(v)]));
 
-        //TODO: Validate left is object and throw with correct source location
-        return left[right];
-    }
-
-    indexSet(lvalue, rvalue) {
-        const target = this.walk(lvalue.left);
-        const key = lvalue.type === 'Index' ? lvalue.right.value : this.walk(lvalue.right);
-        const value = this.walk(rvalue);
-
-        if (typeof (target) !== 'object') throw new Error('Invalid target for object assign');
-
-        target[key] = value;
-    }
-
-    getVariable(name) {
-        if (!this.variables.has(name)) return null;
-
-        return this.variables.get(name).value;
-    }
-
-    setVariable(name, value) {
-        if (this.variables.has(name))
-            this.variables.get(name).value = value;
-        else {
-            const scopedVariable = new Variable(this.scopeIndex, value);
-            this.variables.set(name, scopedVariable);
-        }
-    }
-
-    runBlock({ statements }) {
-        this.startScope();
-
-        for (const statement of statements)
-            this.walk(statement);
-
-        this.endScope();
-    }
-
-    assignment({ type, left, right }) {
-        if (['Index', 'Member'].includes(left.type))
-            this.indexSet(left, right);
-        else if (left.type === 'Identifier') {
-            this.setVariable(left.value, this.walk(right));
-        } else
-            throw new Error('Unexpected lvalue for assignment');
-    }
-
-    walk(node) {
+    //Main walk function
+    const walk = node => {
         try {
             switch (node.type) {
-                case 'Def': return this.createFunction(node);
-                case 'Call': return this.callFunction(node);
-                case 'Member': return this.index(node, true);
-                case 'Index': return this.index(node);
-
-                case 'Equal': return this.assignment(node);
-                case 'Identifier': return this.getVariable(node.value);
-                case 'Block': return this.runBlock(node);
-
-                case 'Object': return this.createObject(node);
-                case 'Array': return this.createArray(node);
-
-                //Values
-                case 'String': return node.value;
-                case 'Number': return parseFloat(node.value);
+                case 'Def': return _runFunctionDef(node);
+                case 'Call': return _runFunctionCall(node);
+                case 'If': return _runIf(node);
+                case 'While': return _runWhile(node);
+                case 'Return': return _runReturn(node);
+                case 'Block': return _runBlock(node);
+                case 'Equal':
+                case 'PlusEqual': case 'DashEqual':
+                case 'StarEqual': case 'SlashEqual':
+                    return _runAssign(node);
+                case 'Index': return _getObject(node);
+                case 'Is': case 'IsNot':
+                case 'RightAngle': case 'LeftAngle':
+                case 'RightAngleEqual': case 'LeftAngleEqual':
+                case 'Plus': case 'Dash':
+                case 'Slash': case 'Star':
+                    return _runBinaryOp(node);
+                case 'Identifier': return _runIdentifier(node);
+                case 'String': return node.children[0];
+                case 'Number': return parseFloat(node.children[0]);
                 case 'True': return true;
                 case 'False': return false;
                 case 'None': return null;
+                case 'Array': return _runArray(node);
+                case 'Object': return _runObject(node);
                 default:
+                    console.log(node.type);
                 // throw new Error(`Unexpected AST node = "${JSON.stringify(node)}"`);
             }
+
         } catch (error) {
-            console.log('Encountered an error when executing your program.');
-            console.log(error);
+            console.error('Encountered an error when executing your program.', error);
         }
-    }
-}
+    };
 
-export default class Snek {
-    errors = [];
-    constructor(source) {
-        this.source = source;
-        this.tokenizer = tokenize(this);
-        this.parser = new Parser(this);
-    }
-
-    addError(message, { position, length }) { this.errors.push({ message, position, length }); }
-
-    execute(runInterpreter = true) {
-        const [success, program] = this.parser.parse();
-
-        if (success) {
-            this.ast = program;
-
-            if (runInterpreter) {
-                const interpreter = new TreeInterpreter();
-
-                interpreter.setVariable('io', {
-                    print: (...args) => console.log(...args)
-                });
-
-                for (const statement of program.statements)
-                    interpreter.walk(statement);
-            }
-        } else
-            this.addError("Failed parsing");
-    }
+    //Actual execution loop
+    _runBlock(nodes);
 }

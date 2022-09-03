@@ -6,6 +6,6 @@ const interpreter = fs.readFileSync('./interpreter.js', 'utf-8');
 
 const whole = [tokenizer, parser, interpreter].join('\n');
 
-fs.writeFileSync('snek2.js', whole);
+fs.writeFileSync('snek.js', whole);
 
 console.log('Wrote', whole.split('\n').length, 'lines.');

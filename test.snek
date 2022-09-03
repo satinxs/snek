@@ -1,2 +1,1 @@
-def say(msg):
-    io.print("Hello " + msg)
+print(print.__proto__)

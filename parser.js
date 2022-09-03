@@ -49,9 +49,9 @@ export function parse(state) {
 
             if (_match('Colon')) {
                 const expr = _parseExpression();
-                node.props.push([_getValue(key), expr]);
+                node.children.push([_getValue(key), expr]);
             } else //Yuck
-                node.props.push([_getValue(key), _node('String', _getValue(key))]);
+                node.children.push([_getValue(key), _node('Identifier', _getValue(key))]);
 
             if (_match('RightCurly')) return node;
 
@@ -64,16 +64,17 @@ export function parse(state) {
     const _parsePrimary = () => _switchMatch(
         () => _throw(`[Syntax] Expected a primary expression: Number, String, Identifier, True, False, Array literal, Object literal or None, but found ${currentToken.type}`, currentToken),
         [['LeftParens'], _parseParenthesizedExpression],
-        [['Number', 'String', 'Identifier', 'True', 'False', 'None'], token => _node(token.type, _getValue(token))],
+        [['Number', 'Identifier', 'True', 'False', 'None'], token => _node(token.type, _getValue(token))],
+        [['String'], token => _node('String', JSON.parse(_getValue(token)))],
         [['LeftSquare'], _parseArray],
         [['LeftCurly'], _parseObject],
     );
 
-    const _memberOrCall = () => {
+    const _parseMemberOrCall = () => {
         let node = _parsePrimary();
         while (true) {
             const r = _switchMatch(() => false,
-                [['Dot'], () => _node('Member', node, _node('Identifier', _getValue(_expect('Identifier'))))],
+                [['Dot'], () => _node('Index', node, _node('String', _getValue(_expect('Identifier'))))],
                 [['LeftSquare'], () => _defer(() => _expect('RightSquare'), _node('Index', node, _parseExpression()))],
                 [['LeftParens'], () => {
                     return _match('RightParens')
@@ -89,7 +90,7 @@ export function parse(state) {
     };
 
     const _parsePrefix = () => _switchMatch(
-        () => _memberOrCall(),
+        () => _parseMemberOrCall(),
         [['Not', 'Dash'], token => _node(`Unary${token.type}`, _parsePrefix())]
     );
 
@@ -118,6 +119,7 @@ export function parse(state) {
 
     const _internalParseBlock = isInline => {
         const statements = [];
+        if (!isInline) _expect('Indent');
         while (!_isEOI() && (isInline || !_match('Dedent'))) {
             const statement = _parseStatement(isInline);
             if (statement.type !== 'Empty') statements.push(statement);
@@ -198,5 +200,5 @@ export function parse(state) {
         }
     }
 
-    return statements;
+    return _node('Program', ...statements);
 }
