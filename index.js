@@ -1,66 +1,8 @@
-// import { parseArgs } from "node:util";
 import * as fs from 'fs';
 import treeify from 'treeify';
 const { asTree } = treeify;
 
-// import Snek from './snek.js';
-
-// const { values: { tokenize, ast } } = parseArgs({ options: { tokenize: { type: 'boolean' }, ast: { type: 'boolean' } } });
-
 const source = fs.readFileSync('test.snek', 'utf-8');
-
-// const snek = new Snek(source);
-
-// if (tokenize) {
-//     const getValue = ({ position, length }) => JSON.stringify(source.substring(position, position + length));
-
-//     const tokenizer = snek.tokenizer;
-//     const write = str => process.stdout.write(str);
-
-//     let token;
-//     do {
-//         token = tokenizer.next().value;
-//         if (token.type === 'NewLine')
-//             write('\n');
-//         else if (token.type === 'Indent')
-//             write('{\n');
-//         else if (token.type === 'Dedent')
-//             write('}\n');
-//         else if (token.type === 'EndOfInput')
-//             write('[EOI]\n\n');
-//         else
-//             write(getValue(token) + ' ');
-//     } while (token.type !== 'EndOfInput');
-// }
-
-// if (ast) {
-//     snek.execute(false);
-
-//     console.log(asTree(snek.ast, true, true));
-
-//     if (snek.errors.length > 0) {
-//         console.error('Failed');
-//         console.error(asTree(snek.errors, true, true));
-//     }
-// }
-
-// //import { readFileSync } from 'fs';
-
-// //const source = readFileSync('test.snek', 'utf-8');
-
-// //const write = msg => process.stdout.write(msg);
-
-// //for (const token of tokenize({ source })) {
-// //    if (token.type === 'NewLine')
-// //        write('\n');
-// //    else if (token.type === 'Indent')
-// //        write('{\n');
-// //    else if (token.type === 'Dedent')
-// //        write('}\n');
-// //    else
-// //        write('[' + token.type + ', ' + JSON.stringify(source.substring(token.position, token.position + token.length)) + ']');
-// //}
-
 
 import { tokenize } from './tokenizer.js';
 import { parse } from './parser.js';
@@ -72,15 +14,58 @@ const state = {
     addError(message, { position, length }) { state.errors.push({ message, position, length }); }
 };
 
-for (const token of tokenize(state))
-    console.log(token);
+console.log('Tokens:');
+
+const write = msg => process.stdout.write(msg);
+const keywords = new Set(['And', 'Break', 'Continue', 'Def', 'Else', 'False', 'If', 'Is', 'None', 'Not', 'Or', 'Return', 'True', 'While']);
+const getValue = ({ position, length }, escape = true) => escape ? JSON.stringify(source.substring(position, position + length)) : source.substring(position, position + length);
+for (const token of tokenize(state)) {
+    if (token.type === 'NewLine')
+        write('\\n\n');
+    else if (token.type === 'Semicolon' || token.type === 'LineEnd')
+        write('<endl>\n');
+    else if (token.type === 'Indent')
+        write('{\n');
+    else if (token.type === 'Dedent')
+        write('}\n');
+    else if (token.type === 'EndOfInput')
+        write('[EOI]\n\n');
+    else if (token.type === 'Identifier')
+        write('i' + getValue(token) + ' ');
+    else if (token.type === 'Number')
+        write('n' + getValue(token) + ' ');
+    else if (keywords.has(token.type))
+        write(token.type + ' ');
+    else
+        write(getValue(token, false) + ' ');
+}
+
+console.log('\n\nNodes:');
 
 state.tokenizer = tokenize(state);
 
 const ast = parse(state);
 
-if (state.errors.length > 0)
-    console.log(asTree(state.errors, true, true));
+//TODO: This is buggy, fix it!
+const calculatePosition = ({ position }) => {
+    const lines = source.split('\n');
+    let pos = 0;
+    let lineIndex = 0;
+    for (; lineIndex < lines.length; lineIndex += 1) {
+        const line = lines[lineIndex];
+
+        if (pos < position)
+            pos += line.length;
+        else break;
+    }
+
+    return { line: lineIndex, column: pos - position };
+};
+
+if (state.errors.length > 0) {
+    for (const error of state.errors)
+        console.error(`Error at ${error.position} ${JSON.stringify(calculatePosition(error))} = ${error.message}`);
+}
 else {
     console.log(asTree(ast, true, true));
 

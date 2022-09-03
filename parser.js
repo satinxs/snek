@@ -116,29 +116,19 @@ export function parse(state) {
 
     const _parseExpression = () => _parseAssignment();
 
-    const _parseInlineBlock = () => {
+    const _internalParseBlock = isInline => {
         const statements = [];
-        while (!_isEOI()) {
-            const statement = _parseStatement(true);
+        while (!_isEOI() && (isInline || !_match('Dedent'))) {
+            const statement = _parseStatement(isInline);
             if (statement.type !== 'Empty') statements.push(statement);
-            if (_match('NewLine')) break;
-            else _expect('Semicolon');
+            if (isInline)
+                if (_match('NewLine')) break;
+                else _expect('Semicolon');
         }
         return _node('Block', ...statements);
     };
 
-    const _parseIndentedBlock = (shouldExpectIndent = true) => {
-        if (shouldExpectIndent) _expect('Indent');
-        const statements = [];
-        while (!_isEOI() && !_match('Dedent')) {
-            const statement = _parseStatement();
-
-            if (statement.type !== 'Empty') statements.push(statement);
-        }
-        return _node('Block', ...statements);
-    };
-
-    const _parseBlock = () => _match('NewLine') ? _parseIndentedBlock() : _parseInlineBlock();
+    const _parseBlock = () => _internalParseBlock(!_match('NewLine'));
 
     const _parseDef = () => {
         const [name, _] = [_node('Identifier', _getValue(_expect('Identifier'))), _expect('LeftParens')];
@@ -184,7 +174,7 @@ export function parse(state) {
     const _parseStatement = (isInline = false) => _switchMatch(
         () => _parseExpressionStatement(isInline),
         [['NewLine'], () => _node('Empty')],
-        [['Indent'], () => _parseIndentedBlock(false)],
+        [['Indent'], () => _internalParseBlock(false)],
         [['Def'], () => _parseDef()],
         [['If'], () => _parseIf()],
         [['While'], () => _parseWhile()],
