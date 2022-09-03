@@ -1,1 +1,14 @@
-print(print.__proto__)
+def fib(n):
+    if n < 2: return [0,1,1][n]
+
+    a = 0
+    b = 1
+    while n > 0:
+        t = a
+        a = b
+        b += t
+        n -= 1
+    
+    return a
+
+print("fib(42) =", fib(42))

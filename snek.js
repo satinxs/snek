@@ -250,6 +250,7 @@ export function parse(state) {
 
     return _node('Program', ...statements);
 }
+
 export class Variable { constructor(scope, value) { this.scope = scope; this.value = value; } }
 
 export function interpret(nodes, initial) {
@@ -392,3 +393,30 @@ export function interpret(nodes, initial) {
     //Actual execution loop
     _runBlock(nodes);
 }
+
+class Snek {
+    constructor(source) {
+        this.source = source;
+        this.errors = [];
+        this.tokenizer = tokenize(this);
+    }
+
+    addError(message, { position, length }) {
+        this.errors.push({ message, position, length });
+    }
+}
+
+export function run(source) {
+    const state = new Snek(source);
+
+    const program = parse(state);
+
+    interpret(program, [
+        ['print', new Variable(-1, (...args) => console.log(...args))]
+    ]);
+}
+
+import fs from 'fs';
+
+const source = fs.readFileSync(process.argv[2], 'utf-8');
+run(source);
