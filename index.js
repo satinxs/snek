@@ -8,6 +8,14 @@ import { tokenize } from './tokenizer.js';
 import { parse } from './parser.js';
 import { interpret } from './interpreter.js';
 
+const tokenizer = fs.readFileSync('./tokenizer.js', 'utf-8');
+const parser = fs.readFileSync('./parser.js', 'utf-8');
+const interpreter = fs.readFileSync('./interpreter.js', 'utf-8');
+
+const whole = [tokenizer, parser, interpreter].join('\n').split('\n');
+
+console.log('snek has a total of:', whole.length, 'lines');
+
 const state = {
     errors: [],
     source,
@@ -71,5 +79,3 @@ else {
 
     interpret(ast);
 }
-
-
